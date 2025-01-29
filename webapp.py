@@ -1,22 +1,41 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler
+import networkx as nx
 import folium
 from streamlit_folium import st_folium
-import networkx as nx
+from sklearn.preprocessing import MinMaxScaler
 
-# Dicionário de usuários e senhas (simples, apenas para teste)
-USUARIOS = {
-    "admin": "1234",
-    "user1": "abcd"
-}
+# === Simulação de Usuários Cadastrados ===
+USUARIOS = {"admin": "1234", "usuario": "senha123"}
 
-# Função para verificar login
-def autenticar(usuario, senha):
-    return USUARIOS.get(usuario) == senha
+# === Função de Login ===
+def login():
+    st.sidebar.title("🔑 Login")
+    username = st.sidebar.text_input("Usuário")
+    password = st.sidebar.text_input("Senha", type="password")
 
-# Função para carregar e processar dados
+    if st.sidebar.button("Entrar"):
+        if username in USUARIOS and USUARIOS[username] == password:
+            st.session_state["logado"] = True
+            st.session_state["usuario"] = username
+            st.session_state["carrinho"] = {}
+            st.sidebar.success(f"Bem-vindo, {username}!")
+        else:
+            st.sidebar.error("Usuário ou senha incorretos!")
+
+# === Verifica Login ===
+if "logado" not in st.session_state:
+    st.session_state["logado"] = False
+
+if not st.session_state["logado"]:
+    login()
+    st.stop()
+
+# === Criando abas ===
+aba = st.sidebar.radio("Escolha uma opção:", ["🛍️ Loja Sustentável", "🗺️ Planejar Rota"])
+
+# === Funções para Planejador de Rotas ===
 def carregar_e_processar_dados(file):
     df = pd.read_csv(file)
     scaler = MinMaxScaler()
@@ -24,76 +43,94 @@ def carregar_e_processar_dados(file):
     df['score'] = (df['poluicao_norm'] + df['transito_norm']) / 2
     return df
 
-# Função para encontrar o melhor percurso
-def encontrar_melhor_circuito(df, num_pontos=10):
-    melhores_pontos = df.nsmallest(num_pontos, 'score')
+def encontrar_rota_otimizada(df, ponto_inicial, ponto_final):
     G = nx.Graph()
-    for idx, row in melhores_pontos.iterrows():
-        G.add_node(idx, pos=(row['latitude'], row['longitude']))
-    for idx1, row1 in melhores_pontos.iterrows():
-        for idx2, row2 in melhores_pontos.iterrows():
-            if idx1 != idx2:
-                dist = np.sqrt((row1['latitude'] - row2['latitude'])**2 + 
-                             (row1['longitude'] - row2['longitude'])**2)
-                G.add_edge(idx1, idx2, weight=dist)
-    circuito = nx.approximation.traveling_salesman_problem(G, cycle=True)
-    return melhores_pontos.loc[circuito]
+    for _, row in df.iterrows():
+        G.add_node(row.name, pos=(row['latitude'], row['longitude']), score=row['score'])
 
-# Função para criar o mapa
-def criar_mapa(df_circuito):
-    centro = [df_circuito['latitude'].mean(), df_circuito['longitude'].mean()]
+    for i, row1 in df.iterrows():
+        for j, row2 in df.iterrows():
+            if i != j:
+                dist = np.linalg.norm([row1['latitude'] - row2['latitude'], row1['longitude'] - row2['longitude']])
+                peso = dist + (row1['score'] + row2['score'])  
+                G.add_edge(i, j, weight=peso)
+
+    caminho = nx.shortest_path(G, source=ponto_inicial, target=ponto_final, weight='weight')
+    return df.loc[caminho]
+
+def criar_mapa(df_rota):
+    centro = [df_rota['latitude'].mean(), df_rota['longitude'].mean()]
     m = folium.Map(location=centro, zoom_start=13)
-    for idx, row in df_circuito.iterrows():
+
+    for _, row in df_rota.iterrows():
         folium.Marker(
             [row['latitude'], row['longitude']],
-            popup=f"Poluição: {row['poluicao']:.2f}<br>Trânsito: {row['transito']:.2f}",
-            tooltip=f"Ponto {idx}"
+            popup=f"Poluição: {row['poluicao']:.2f} | Trânsito: {row['transito']:.2f}"
         ).add_to(m)
-    pontos = df_circuito[['latitude', 'longitude']].values.tolist()
-    pontos.append(pontos[0])  
-    folium.PolyLine(pontos, weight=2, color='red', opacity=0.8).add_to(m)
+
+    pontos = df_rota[['latitude', 'longitude']].values.tolist()
+    folium.PolyLine(pontos, color='blue', weight=2.5, opacity=0.7).add_to(m)
     return m
 
-# Interface principal
-def main():
-    st.title('Otimizador de Percurso Sustentável')
+if aba == "🗺️ Planejar Rota":
+    st.title("🗺️ Planejador de Rota Ecológica")
+    uploaded_file = st.file_uploader("📂 Escolha um arquivo CSV", type="csv")
 
-    # Controle de login
-    if "logado" not in st.session_state:
-        st.session_state.logado = False
-
-    if not st.session_state.logado:
-        st.subheader("🔐 Login")
-        usuario = st.text_input("Usuário")
-        senha = st.text_input("Senha", type="password")
-        if st.button("Entrar"):
-            if autenticar(usuario, senha):
-                st.session_state.logado = True
-                st.success(f"Bem-vindo, {usuario}!")
-                st.experimental_rerun()
-            else:
-                st.error("Usuário ou senha incorretos!")
-        return
-
-    # Se logado, exibe a aplicação
-    st.sidebar.button("Sair", on_click=lambda: st.session_state.update({"logado": False}))
-
-    uploaded_file = st.file_uploader("Escolha seu arquivo CSV", type="csv")
-    if uploaded_file is not None:
+    if uploaded_file:
         df = carregar_e_processar_dados(uploaded_file)
-        num_pontos = st.slider('Número de pontos no circuito', 5, 20, 10)
-        df_circuito = encontrar_melhor_circuito(df, num_pontos)
-        mapa = criar_mapa(df_circuito)
-        st_folium(mapa, width=800)
+        pontos_disponiveis = df.index.tolist()
+        
+        ponto_inicial = st.selectbox("Selecione o Ponto Inicial", pontos_disponiveis)
+        ponto_final = st.selectbox("Selecione o Ponto Final", pontos_disponiveis)
 
-        st.subheader('Estatísticas do Circuito')
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric('Média de Poluição', f"{df_circuito['poluicao'].mean():.2f}")
-        with col2:
-            st.metric('Média de Trânsito', f"{df_circuito['transito'].mean():.2f}")
-        st.subheader('Pontos do Circuito')
-        st.dataframe(df_circuito[['latitude', 'longitude', 'poluicao', 'transito']])
+        if st.button("🔍 Calcular Melhor Rota"):
+            df_rota = encontrar_rota_otimizada(df, ponto_inicial, ponto_final)
+            mapa = criar_mapa(df_rota)
+            st_folium(mapa, width=800)
 
-if __name__ == '__main__':
-    main()
+# === Loja Sustentável ===
+if aba == "🛍️ Loja Sustentável":
+    st.title("🛍️ Loja Sustentável")
+    produtos = [
+        {"nome": "Cesta Orgânica", "preco": 12.99, "img": "https://via.placeholder.com/150"},
+        {"nome": "Sabonete Natural", "preco": 7.50, "img": "https://via.placeholder.com/150"},
+        {"nome": "Bolsa Ecológica", "preco": 15.00, "img": "https://via.placeholder.com/150"},
+        {"nome": "Kit Bambu", "preco": 9.99, "img": "https://via.placeholder.com/150"},
+        {"nome": "Mel Orgânico", "preco": 18.50, "img": "https://via.placeholder.com/150"},
+        {"nome": "Horta Caseira", "preco": 25.00, "img": "https://via.placeholder.com/150"},
+        {"nome": "Cosméticos Naturais", "preco": 19.99, "img": "https://via.placeholder.com/150"},
+        {"nome": "Chá Artesanal", "preco": 10.99, "img": "https://via.placeholder.com/150"},
+        {"nome": "Velas Ecológicas", "preco": 14.50, "img": "https://via.placeholder.com/150"},
+    ]
+
+    def adicionar_ao_carrinho(produto):
+        if produto in st.session_state["carrinho"]:
+            st.session_state["carrinho"][produto] += 1
+        else:
+            st.session_state["carrinho"][produto] = 1
+
+    cols = st.columns(3)
+
+    for i, produto in enumerate(produtos):
+        with cols[i % 3]:
+            st.image(produto["img"], caption=produto["nome"])
+            st.write(f"💲 {produto['preco']:.2f}")
+            if st.button(f"🛒 Adicionar {produto['nome']}", key=produto["nome"]):
+                adicionar_ao_carrinho(produto["nome"])
+                st.success(f"{produto['nome']} adicionado ao carrinho!")
+
+    st.sidebar.title("🛒 Carrinho de Compras")
+    if st.session_state["carrinho"]:
+        total = 0
+        for item, qtd in st.session_state["carrinho"].items():
+            preco = next(p["preco"] for p in produtos if p["nome"] == item)
+            subtotal = preco * qtd
+            total += subtotal
+            st.sidebar.write(f"{item} ({qtd}x) - 💲{subtotal:.2f}")
+
+        st.sidebar.write(f"**Total: 💲{total:.2f}**")
+        if st.sidebar.button("✅ Finalizar Pedido"):
+            st.sidebar.success("Pedido realizado com sucesso! 🌱")
+            st.session_state["carrinho"] = {}
+    else:
+        st.sidebar.write("Seu carrinho está vazio.")
